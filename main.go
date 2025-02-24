@@ -11,12 +11,55 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gosnmp/gosnmp"
 )
 
 // Estrutura para resposta da API
 type Device struct {
 	IP   string `json:"ip"`
 	Name string `json:"name"`
+}
+
+func getPrinterInfo(ip string) {
+	// Configuração SNMP (Versão 2c e comunidade "public")
+	snmp := &gosnmp.GoSNMP{
+		Target:    ip,
+		Port:      161,
+		Community: "public",
+		Version:   gosnmp.Version2c,
+		Timeout:   time.Duration(2) * time.Second,
+		Retries:   3,
+	}
+
+	// Inicia a conexão SNMP
+	err := snmp.Connect()
+	if err != nil {
+		log.Printf("Erro ao conectar a %s: %v\n", ip, err)
+		return
+	}
+	defer snmp.Conn.Close()
+
+	// OIDs comuns de impressoras
+	oids := map[string]string{
+		"Nome do Dispositivo": "1.3.6.1.2.1.1.5.0",           // sysName
+		"Modelo":              "1.3.6.1.2.1.25.3.2.1.3.1",    // hrDeviceDescr
+		"Número de Páginas":   "1.3.6.1.2.1.43.10.2.1.4.1.1", // OID genérico de contagem de páginas
+		"Nível de Toner":      "1.3.6.1.2.1.43.11.1.1.9.1.1", // OID genérico para toner
+	}
+
+	// Faz requisição SNMP para cada OID
+	for desc, oid := range oids {
+		result, err := snmp.Get([]string{oid})
+		if err != nil {
+			log.Printf("[%s] Erro ao buscar %s: %v\n", ip, desc, err)
+			continue
+		}
+
+		// Exibe os resultados
+		for _, variable := range result.Variables {
+			fmt.Printf("[%s] %s: %v\n", ip, desc, variable.Value)
+		}
+	}
 }
 
 // Verifica se um IP responde ao ping
@@ -58,7 +101,6 @@ func checkEpson(ip string) bool {
 	return false
 }
 
-// Verifica se um IP é uma Epson L3250
 func identifyPrinter(ip string) bool {
 	if !isOnline(ip) {
 		return false
@@ -68,7 +110,6 @@ func identifyPrinter(ip string) bool {
 	return checkEpson(ip) || contains(openPorts, 9100)
 }
 
-// Verifica se um slice contém um valor
 func contains(slice []int, value int) bool {
 	for _, v := range slice {
 		if v == value {
@@ -78,8 +119,7 @@ func contains(slice []int, value int) bool {
 	return false
 }
 
-// Busca impressoras Epson na rede
-func findEpsonPrinters(ips []string) []Device {
+func findPrinters(ips []string) []Device {
 	var wg sync.WaitGroup
 	var mutex sync.Mutex
 	var foundPrinters []Device
@@ -90,7 +130,8 @@ func findEpsonPrinters(ips []string) []Device {
 			defer wg.Done()
 			if identifyPrinter(ip) {
 				mutex.Lock()
-				foundPrinters = append(foundPrinters, Device{IP: ip, Name: "Epson L3250"})
+				getPrinterInfo(ip)
+				foundPrinters = append(foundPrinters, Device{IP: ip, Name: "Possível impressora"})
 				mutex.Unlock()
 			}
 		}(ip)
@@ -99,15 +140,14 @@ func findEpsonPrinters(ips []string) []Device {
 	return foundPrinters
 }
 
-// Endpoint para buscar impressoras Epson
 func getPrinters(c *gin.Context) {
-	log.Println("Buscando impressoras Epson na rede...")
+	log.Println("Buscando impressoras na rede...")
 	ips := []string{}
 	for i := 1; i < 255; i++ {
 		ips = append(ips, fmt.Sprintf("192.168.1.%d", i))
 	}
 
-	printers := findEpsonPrinters(ips)
+	printers := findPrinters(ips)
 	c.JSON(http.StatusOK, printers)
 }
 
@@ -115,10 +155,8 @@ func main() {
 	r := gin.Default()
 	log.Println("Servidor iniciado...")
 
-	// Criando endpoint
 	r.GET("/api/printers", getPrinters)
 
-	// Rodando o servidor na porta 8080
 	fmt.Println("Servidor rodando em http://localhost:8080")
 	r.Run("0.0.0.0:8080")
 }
